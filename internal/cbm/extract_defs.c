@@ -1242,7 +1242,13 @@ static int collect_bases_from_field(CBMArena *a, TSNode field_node, const char *
         const char *ck = ts_node_type(child);
         if (strcmp(ck, "type_identifier") == 0 || strcmp(ck, "generic_type") == 0 ||
             strcmp(ck, "qualified_name") == 0 || strcmp(ck, "scoped_type_identifier") == 0 ||
-            strcmp(ck, "user_type") == 0) {
+            strcmp(ck, "user_type") == 0 ||
+            /* Python `class C(Base)` carries the base as a bare `identifier`
+             * inside the `superclasses` argument_list (and `attribute` for a
+             * dotted base like `mod.Base`). Without these the raw-text fallback
+             * below captured the whole "(Base)" field text, which never
+             * resolved -> zero INHERITS edges for Python subclasses. */
+            strcmp(ck, "identifier") == 0 || strcmp(ck, "attribute") == 0) {
             char *t = cbm_node_text(a, child, source);
             if (t) {
                 char *angle = strchr(t, '<');
