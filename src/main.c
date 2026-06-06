@@ -407,8 +407,8 @@ int main(int argc, char **argv) {
     pid_t initial_ppid = getppid();
     cbm_thread_t parent_watchdog_tid;
     bool parent_watchdog_started = false;
-    if (cbm_thread_create(&parent_watchdog_tid, PARENT_WATCHDOG_STACK_SIZE,
-                          parent_watchdog_thread, &initial_ppid) == 0) {
+    if (cbm_thread_create(&parent_watchdog_tid, PARENT_WATCHDOG_STACK_SIZE, parent_watchdog_thread,
+                          &initial_ppid) == 0) {
         parent_watchdog_started = true;
     } else {
         cbm_log_warn("parent.watchdog.unavailable", "reason", "thread_create_failed");
