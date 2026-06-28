@@ -43,8 +43,17 @@ jobs:
             {"os":"ubuntu-22.04-arm","cc":"gcc","cxx":"g++","optional":true},
             {"os":"macos-15","cc":"cc","cxx":"c++","optional":true}
           ]'
-          CORE_WIN='[{"os":"windows-latest"}]'
-          BROAD_WIN='[{"os":"windows-2025","optional":true},{"os":"windows-11-arm","optional":true}]'
+          # Each Windows leg pins the msys2 environment + package arch to the
+          # RUNNER architecture so the build is native, never emulated:
+          #   x86-64 runners -> CLANG64 (mingw-w64-clang-x86_64-*)
+          #   ARM64  runner  -> CLANGARM64 (mingw-w64-clang-aarch64-*)
+          # windows-11-arm previously used the x86-64 CLANG64 toolchain, so its
+          # binary ran under Windows-on-ARM x86-64 emulation and ASan's function
+          # interception crashed (interception_win: unhandled instruction). With
+          # the native ARM64 toolchain ASan instruments native ARM64 code, so it
+          # is a real (non-optional) gate, not a tolerated emulated-flake.
+          CORE_WIN='[{"os":"windows-latest","msystem":"CLANG64","pkg":"x86_64"}]'
+          BROAD_WIN='[{"os":"windows-2025","optional":true,"msystem":"CLANG64","pkg":"x86_64"},{"os":"windows-11-arm","msystem":"CLANGARM64","pkg":"aarch64"}]'
           if [ "$BROAD" = "true" ]; then
             UNIX=$(jq -cn --argjson a "$CORE_UNIX" --argjson b "$BROAD_UNIX" '$a + $b')
             WIN=$(jq -cn --argjson a "$CORE_WIN" --argjson b "$BROAD_WIN" '$a + $b')
@@ -90,12 +99,12 @@ jobs:
 
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
         with:
-          msystem: CLANG64
+          msystem: ${{ matrix.msystem }}
           path-type: inherit
           install: >-
-            mingw-w64-clang-x86_64-clang
-            mingw-w64-clang-x86_64-compiler-rt
-            mingw-w64-clang-x86_64-zlib
+            mingw-w64-clang-${{ matrix.pkg }}-clang
+            mingw-w64-clang-${{ matrix.pkg }}-compiler-rt
+            mingw-w64-clang-${{ matrix.pkg }}-zlib
             make
             git
 
