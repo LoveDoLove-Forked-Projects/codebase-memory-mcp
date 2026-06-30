@@ -705,6 +705,26 @@ char *cbm_mcp_get_string_arg(const char *args_json, const char *key) {
     return result;
 }
 
+/* Resolve the project argument, accepting the canonical "project" key plus the
+ * aliases a caller naturally reaches for (#640): list_projects surfaces the
+ * field as "name" and the not-found hint says "pass the project name", so
+ * "project_name" is the usual guess; "project_id" / "projectName" are accepted
+ * too. NOT bare "name" — index_repository uses "name" for an explicit
+ * project-name override. Caller must free() the result. */
+static char *get_project_arg(const char *args_json) {
+    char *p = cbm_mcp_get_string_arg(args_json, "project");
+    if (!p) {
+        p = cbm_mcp_get_string_arg(args_json, "project_name");
+    }
+    if (!p) {
+        p = cbm_mcp_get_string_arg(args_json, "project_id");
+    }
+    if (!p) {
+        p = cbm_mcp_get_string_arg(args_json, "projectName");
+    }
+    return p;
+}
+
 int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val) {
     yyjson_doc *doc = yyjson_read(args_json, strlen(args_json), 0);
     if (!doc) {
@@ -1039,7 +1059,8 @@ static char *build_project_list_error(const char *reason) {
     if (count > 0) {
         snprintf(buf, sizeof(buf),
                  "{\"error\":\"%s\",\"hint\":\"Use list_projects to see all indexed projects, "
-                 "then pass the project name.\",\"available_projects\":[%s],\"count\":%d}",
+                 "then pass it as the \\\"project\\\" "
+                 "argument.\",\"available_projects\":[%s],\"count\":%d}",
                  reason, projects, count);
     } else {
         snprintf(buf, sizeof(buf),
@@ -1050,16 +1071,34 @@ static char *build_project_list_error(const char *reason) {
     return heap_strdup(buf);
 }
 
-/* Bail with project list when no store is available. */
-#define REQUIRE_STORE(store, project)                                                  \
-    do {                                                                               \
-        if (!(store)) {                                                                \
-            char *_err = build_project_list_error("project not found or not indexed"); \
-            char *_res = cbm_mcp_text_result(_err, true);                              \
-            free(_err);                                                                \
-            free(project);                                                             \
-            return _res;                                                               \
-        }                                                                              \
+/* Distinct from "unknown project": the caller omitted the project argument
+ * entirely (no recognized key). Name the literal "project" key so the fix is
+ * obvious (#640). Caller must free() result. */
+static char *build_missing_project_error(void) {
+    return heap_strdup("{\"error\":\"missing required argument: project\",\"hint\":\"Pass "
+                       "the project as the \\\"project\\\" argument, e.g. "
+                       "{\\\"project\\\":\\\"<name from list_projects>\\\"}. Run "
+                       "list_projects to see indexed projects.\"}");
+}
+
+/* Pick the right no-store error: a NULL project means the argument was missing
+ * (clearer message); a non-NULL project that didn't resolve means it's
+ * unknown/unindexed (list the available ones). */
+static char *build_no_store_error(const char *project) {
+    return project ? build_project_list_error("project not found or not indexed")
+                   : build_missing_project_error();
+}
+
+/* Bail with the right error when no store is available. */
+#define REQUIRE_STORE(store, project)                     \
+    do {                                                  \
+        if (!(store)) {                                   \
+            char *_err = build_no_store_error(project);   \
+            char *_res = cbm_mcp_text_result(_err, true); \
+            free(_err);                                   \
+            free(project);                                \
+            return _res;                                  \
+        }                                                 \
     } while (0)
 
 /* ── Tool handler implementations ─────────────────────────────── */
@@ -1200,7 +1239,7 @@ static char *verify_project_indexed(cbm_store_t *store, const char *project) {
 }
 
 static char *handle_get_graph_schema(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
 
@@ -1668,7 +1707,7 @@ static bool run_semantic_query(yyjson_mut_doc *doc, yyjson_mut_val *root, const 
 }
 
 static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
 
@@ -1813,7 +1852,7 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
 
 static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     char *query = cbm_mcp_get_string_arg(args, "query");
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 0);
 
@@ -1891,7 +1930,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
 }
 
 static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
 
@@ -1935,7 +1974,7 @@ static char *handle_index_status(cbm_mcp_server_t *srv, const char *args) {
 
 /* delete_project: just erase the .db file (and WAL/SHM). */
 static char *handle_delete_project(cbm_mcp_server_t *srv, const char *args) {
-    char *name = cbm_mcp_get_string_arg(args, "project");
+    char *name = get_project_arg(args);
     if (!name) {
         return cbm_mcp_text_result("project is required", true);
     }
@@ -2046,7 +2085,7 @@ static void append_cross_repo_summary(yyjson_mut_doc *doc, yyjson_mut_val *root,
 }
 
 static char *handle_get_architecture(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     char *scope_path = cbm_mcp_get_string_arg(args, "path");
     cbm_store_t *store = resolve_store(srv, project);
     REQUIRE_STORE(store, project);
@@ -2598,7 +2637,7 @@ static void bfs_union_same_name(cbm_store_t *store, const cbm_node_t *nodes, int
 
 static char *handle_trace_call_path(cbm_mcp_server_t *srv, const char *args) {
     char *func_name = cbm_mcp_get_string_arg(args, "function_name");
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     cbm_store_t *store = resolve_store(srv, project);
     char *direction = cbm_mcp_get_string_arg(args, "direction");
     char *mode = cbm_mcp_get_string_arg(args, "mode");
@@ -3460,7 +3499,7 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
 
 static char *handle_get_code_snippet(cbm_mcp_server_t *srv, const char *args) {
     char *qn = cbm_mcp_get_string_arg(args, "qualified_name");
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     bool include_neighbors = cbm_mcp_get_bool_arg(args, "include_neighbors");
 
     if (!qn) {
@@ -4176,7 +4215,7 @@ static bool compile_path_filter(const char *filter, cbm_regex_t *re) {
 
 static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     char *pattern = cbm_mcp_get_string_arg(args, "pattern");
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     char *file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
     char *path_filter = cbm_mcp_get_string_arg(args, "path_filter");
     char *mode_str = cbm_mcp_get_string_arg(args, "mode");
@@ -4434,7 +4473,7 @@ static void detect_add_impacted_symbols(cbm_store_t *store, const char *project,
 }
 
 static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     char *base_branch = cbm_mcp_get_string_arg(args, "base_branch");
     char *since = cbm_mcp_get_string_arg(args, "since");
     char *scope = cbm_mcp_get_string_arg(args, "scope");
@@ -4674,7 +4713,7 @@ static char *adr_read_legacy_file(const char *root_path) {
     "PATTERNS, TRADEOFFS, PHILOSOPHY."
 
 static char *handle_manage_adr(cbm_mcp_server_t *srv, const char *args) {
-    char *project = cbm_mcp_get_string_arg(args, "project");
+    char *project = get_project_arg(args);
     char *mode_str = cbm_mcp_get_string_arg(args, "mode");
     char *content = cbm_mcp_get_string_arg(args, "content");
 

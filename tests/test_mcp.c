@@ -894,6 +894,95 @@ TEST(tool_get_architecture_emits_populated_sections) {
     PASS();
 }
 
+/* Reproduce-first for #640: query handlers must accept the `project_name`
+ * alias, not only the canonical `project` key. list_projects surfaces the field
+ * as "name" and the error hint says "pass the project name", so a caller
+ * naturally passes `project_name`. With no alias, the handler reads key
+ * "project" -> NULL -> resolve_store bails before opening any .db -> "project
+ * not found or not indexed" even though the project is indexed. Mirrors
+ * tool_get_architecture_emits_populated_sections but with the alias key. */
+TEST(tool_get_architecture_accepts_project_name_alias_issue640) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+
+    const char *proj = "alias640";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/alias640");
+
+    cbm_node_t main_fn = {0};
+    main_fn.project = proj;
+    main_fn.label = "Function";
+    main_fn.name = "main";
+    main_fn.qualified_name = "alias640.cmd.main";
+    main_fn.file_path = "cmd/main.go";
+    main_fn.start_line = 1;
+    main_fn.end_line = 3;
+    main_fn.properties_json = "{\"is_entry_point\":true}";
+    ASSERT_GT(cbm_store_upsert_node(st, &main_fn), 0);
+
+    /* Caller passes `project_name` (the natural guess) instead of `project`. */
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":640,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"get_architecture\","
+             "\"arguments\":{\"project_name\":\"alias640\",\"aspects\":[\"all\"]}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+
+    /* RED before the alias: inner is the "project not found" error.
+     * GREEN after: the alias resolves and architecture sections surface. */
+    ASSERT_NULL(strstr(inner, "project not found"));
+    ASSERT_NOT_NULL(strstr(inner, "\"entry_points\""));
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* Reproduce-first for #640: the alias must apply across query handlers, not
+ * just get_architecture. search_graph with `project_name` must resolve too. */
+TEST(tool_search_graph_accepts_project_name_alias_issue640) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+
+    const char *proj = "alias640b";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/alias640b");
+
+    cbm_node_t fn = {0};
+    fn.project = proj;
+    fn.label = "Function";
+    fn.name = "WidgetHandler";
+    fn.qualified_name = "alias640b.svc.WidgetHandler";
+    fn.file_path = "svc/widget.go";
+    fn.start_line = 1;
+    fn.end_line = 2;
+    ASSERT_GT(cbm_store_upsert_node(st, &fn), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":641,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_graph\","
+             "\"arguments\":{\"project_name\":\"alias640b\",\"name_pattern\":\"Widget.*\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+
+    ASSERT_NULL(strstr(inner, "project not found"));
+    ASSERT_NOT_NULL(strstr(inner, "WidgetHandler"));
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 /* Regression for #604: path scopes architecture totals and content. */
 TEST(tool_get_architecture_path_scoping) {
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
@@ -2488,6 +2577,8 @@ SUITE(mcp) {
     RUN_TEST(tool_delete_project_not_found);
     RUN_TEST(tool_get_architecture_empty);
     RUN_TEST(tool_get_architecture_emits_populated_sections);
+    RUN_TEST(tool_get_architecture_accepts_project_name_alias_issue640);
+    RUN_TEST(tool_search_graph_accepts_project_name_alias_issue640);
     RUN_TEST(tool_get_architecture_path_scoping);
     RUN_TEST(tool_query_graph_missing_query);
 
