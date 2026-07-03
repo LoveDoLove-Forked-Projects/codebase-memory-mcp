@@ -50,6 +50,9 @@ enum {
 #include <string.h>
 #include <signal.h>
 #include <stdatomic.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #ifndef CBM_VERSION
 #define CBM_VERSION "dev"
@@ -120,9 +123,9 @@ static void *parent_watchdog_thread(void *arg) {
         /* initial_ppid > 1 guards against an already-orphaned start (ppid==1),
          * where a changing ppid carries no signal. */
         if (initial_ppid > 1 && getppid() != initial_ppid) {
-            cbm_log_warn("parent.exited", "reason", "ppid_changed");
-            request_shutdown();
-            exit(0);
+            static const char msg[] = "level=warn msg=parent.exited reason=ppid_changed\n";
+            (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            _exit(0);
         }
     }
     return NULL;
