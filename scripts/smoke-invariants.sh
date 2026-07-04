@@ -454,28 +454,48 @@ inv_tools_list() {
         fail "tools-list" "server not alive"
         return
     fi
-    local req='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-    if ! mcp_send_recv "$req" 15; then
-        fail "tools-list" "no response within 15s (hang)"
-        return
-    fi
-    if ! printf '%s' "$MCP_RESP" | is_json; then
-        fail "tools-list" "response not valid JSON"
-        return
-    fi
-    # Extract tool names from result.tools[].name.
-    local got_names got_count
-    got_names="$(printf '%s' "$MCP_RESP" | "$PY" -c '
+    # tools/list is cursor-paginated (MCP spec): the server returns a page of
+    # tools plus result.nextCursor. Follow the cursor across pages and accumulate
+    # the advertised tools — exactly what a compliant client does — then assert the
+    # union covers all expected tools.
+    local got_names="" cursor="" page=0
+    while :; do
+        page=$((page + 1))
+        if [ "$page" -gt 20 ]; then
+            fail "tools-list" "pagination did not terminate after 20 pages"
+            return
+        fi
+        local params='{}'
+        [ -n "$cursor" ] && params="{\"cursor\":\"$cursor\"}"
+        local req="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":$params}"
+        if ! mcp_send_recv "$req" 15; then
+            fail "tools-list" "no response within 15s (page $page, hang)"
+            return
+        fi
+        if ! printf '%s' "$MCP_RESP" | is_json; then
+            fail "tools-list" "response not valid JSON (page $page)"
+            return
+        fi
+        # Line 1 = space-joined names on this page; line 2 = nextCursor ("" if last).
+        local parsed
+        parsed="$(printf '%s' "$MCP_RESP" | "$PY" -c '
 import sys,json
 try:
     d=json.load(sys.stdin)
 except Exception:
-    sys.exit(0)
-tools=(d.get("result") or {}).get("tools") or []
-print(" ".join(sorted(t.get("name","") for t in tools)))' 2>/dev/null)"
-    got_count="$(printf '%s' "$got_names" | tr ' ' '\n' | grep -c . )"
+    print(""); print(""); sys.exit(0)
+r=d.get("result") or {}
+print(" ".join(t.get("name","") for t in (r.get("tools") or [])))
+print(r.get("nextCursor") or "")' 2>/dev/null)"
+        got_names="$got_names $(printf '%s' "$parsed" | sed -n '1p')"
+        local next; next="$(printf '%s' "$parsed" | sed -n '2p')"
+        [ -z "$next" ] && break
+        cursor="$next"
+    done
+    local got_count
+    got_count="$(printf '%s' "$got_names" | tr ' ' '\n' | grep -c .)"
     if [ "${got_count:-0}" -ne "$EXPECTED_TOOL_COUNT" ]; then
-        fail "tools-list" "got $got_count tools, expected $EXPECTED_TOOL_COUNT; names=[$got_names]"
+        fail "tools-list" "got $got_count tools across $page page(s), expected $EXPECTED_TOOL_COUNT; names=[$got_names]"
         return
     fi
     local missing=""

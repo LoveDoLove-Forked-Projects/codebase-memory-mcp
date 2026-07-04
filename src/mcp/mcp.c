@@ -5684,8 +5684,9 @@ static int poll_for_input_unix(cbm_mcp_server_t *srv, int fd, FILE *in) {
     /* Phase 2: peek FILE* buffer */
     int saved_flags = fcntl(fd, F_GETFL);
     if (saved_flags < 0) {
-        /* fcntl failed — fall through to blocking poll */
-        pr = poll(&pfd, SKIP_ONE, STORE_IDLE_TIMEOUT_S * MCP_TIMEOUT_MS);
+        /* fcntl failed — fall through to a short blocking poll (see the Phase-3
+         * note below on why the interval is bounded, not the full idle timeout) */
+        pr = poll(&pfd, SKIP_ONE, MCP_TIMEOUT_MS);
         if (pr < 0) {
             return CBM_NOT_FOUND;
         }
@@ -5705,8 +5706,15 @@ static int poll_for_input_unix(cbm_mcp_server_t *srv, int fd, FILE *in) {
             return CBM_NOT_FOUND; /* true EOF */
         }
         clearerr(in);
-        /* Phase 3: blocking poll */
-        pr = poll(&pfd, SKIP_ONE, STORE_IDLE_TIMEOUT_S * MCP_TIMEOUT_MS);
+        /* Phase 3: blocking poll, bounded to a SHORT interval (not the full idle
+         * timeout). macOS poll()/select() do NOT report POLLIN/POLLHUP when a
+         * FIFO's last writer closes — only read() returns 0 there (verified). A
+         * 60s poll would therefore leave the server blocked up to a full idle
+         * timeout after stdin EOF (a client that closes the pipe would appear to
+         * hang). Waking every MCP_TIMEOUT_MS lets the Phase-2 read() above detect
+         * the EOF within ~1s. Idle-store eviction (threshold STORE_IDLE_TIMEOUT_S)
+         * is idempotent, so checking it on each short tick is harmless. */
+        pr = poll(&pfd, SKIP_ONE, MCP_TIMEOUT_MS);
         if (pr < 0) {
             return CBM_NOT_FOUND;
         }
