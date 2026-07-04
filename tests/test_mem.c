@@ -180,10 +180,23 @@ TEST(mem_rss_positive) {
 
 TEST(mem_peak_rss_gte_rss) {
     cbm_mem_init(0.5);
+    /* peak >= current RSS is definitional. Regression guard for the Linux
+     * statm-vs-ru_maxrss source mismatch: cbm_mem_rss() reads the live
+     * /proc/self/statm value (page-granular) while mimalloc's peak comes from
+     * getrusage ru_maxrss (KB-granular, and it lags), so a live current read
+     * could momentarily exceed the reported peak by a few pages and break the
+     * invariant. cbm_mem_peak_rss() now reconciles the two sources. Touch a
+     * fresh buffer so the check runs against a non-trivial live current read.
+     * (Linux-only bug — macOS reads both from mimalloc; it flaked on the
+     * Linux/ARM CI leg, which is the authoritative reproduction tier.) */
+    size_t n = 32 * 1024 * 1024;
+    char *p = (char *)malloc(n);
+    ASSERT_NOT_NULL(p);
+    memset(p, 0xBE, n); /* fault in all pages so current RSS is non-trivial */
     size_t rss = cbm_mem_rss();
     size_t peak = cbm_mem_peak_rss();
-    /* Peak must be >= current RSS */
     ASSERT_GTE(peak, rss);
+    free(p);
     PASS();
 }
 

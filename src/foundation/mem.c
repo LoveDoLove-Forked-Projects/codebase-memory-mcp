@@ -212,6 +212,17 @@ size_t cbm_mem_rss(void) {
 size_t cbm_mem_peak_rss(void) {
     size_t peak_rss = 0;
     mi_process_info(NULL, NULL, NULL, NULL, &peak_rss, NULL, NULL, NULL);
+    /* Peak RSS is by definition >= current RSS. On Linux cbm_mem_rss() reads the
+     * live /proc/self/statm value (page-granular), while mimalloc's peak_rss
+     * comes from getrusage's ru_maxrss (KB-granular, and it can lag the live
+     * statm read by a few pages). Reading the two sources independently lets a
+     * fresh current read momentarily exceed the reported peak, breaking the
+     * peak >= current invariant. Reconcile them: the true peak is at least the
+     * current RSS. (Not observable on macOS, where both come from mimalloc.) */
+    size_t current = cbm_mem_rss();
+    if (current > peak_rss) {
+        peak_rss = current;
+    }
     if (peak_rss > 0) {
         return peak_rss;
     }
