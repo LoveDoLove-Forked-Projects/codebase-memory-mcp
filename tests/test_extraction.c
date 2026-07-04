@@ -3350,6 +3350,46 @@ TEST(walk_defs_no_truncation_over_4096_issue668) {
  * Suite
  * ═══════════════════════════════════════════════════════════════════ */
 
+/* Rust: inline #[test]/#[tokio::test] functions must be marked is_test so the
+ * store.c `is_test != 1` filter excludes them from graph context. Detection is
+ * otherwise file-path-based (cbm_is_test_file), so test fns in a regular .rs
+ * file leak. (#855) */
+TEST(extract_rust_test_attr_marks_is_test_issue855) {
+    CBMFileResult *r = extract(
+        "pub fn real_fn() {}\n"
+        "\n"
+        "#[test]\n"
+        "fn sync_test() {}\n"
+        "\n"
+        "#[tokio::test]\n"
+        "async fn async_test() {}\n",
+        CBM_LANG_RUST, "t", "src/lib.rs");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    int real = -1, sync = -1, asyn = -1;
+    for (int i = 0; i < r->defs.count; i++) {
+        const char *n = r->defs.items[i].name;
+        if (!n) {
+            continue;
+        }
+        if (strcmp(n, "real_fn") == 0) {
+            real = r->defs.items[i].is_test ? 1 : 0;
+        } else if (strcmp(n, "sync_test") == 0) {
+            sync = r->defs.items[i].is_test ? 1 : 0;
+        } else if (strcmp(n, "async_test") == 0) {
+            asyn = r->defs.items[i].is_test ? 1 : 0;
+        }
+    }
+    ASSERT(real >= 0 && sync >= 0 && asyn >= 0 && "all three fns extracted");
+    ASSERT(real == 0 && "real_fn is NOT a test");
+    ASSERT(sync == 1 && "#[test] fn is_test");
+    ASSERT(asyn == 1 && "#[tokio::test] fn is_test");
+
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
@@ -3597,6 +3637,7 @@ SUITE(extraction) {
     RUN_TEST(complexity_go_method_receiver_self_recursion);
     RUN_TEST(complexity_access_depth_and_params);
     RUN_TEST(walk_defs_no_truncation_over_4096_issue668);
+    RUN_TEST(extract_rust_test_attr_marks_is_test_issue855);
 
     cbm_shutdown();
 }
