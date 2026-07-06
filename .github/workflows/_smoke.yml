@@ -235,6 +235,7 @@ jobs:
         run: scripts/smoke-test.sh ./codebase-memory-mcp.exe
         env:
           SMOKE_DOWNLOAD_URL: http://127.0.0.1:18080
+          SMOKE_ARCH: ${{ matrix.arch }}
 
       - name: Security audits
         shell: msys2 {0}

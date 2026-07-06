@@ -1570,18 +1570,26 @@ DL_OS=$(uname -s | tr 'A-Z' 'a-z')
 case "$DL_OS" in
   mingw*|msys*) DL_OS="windows" ;;
 esac
-DL_ARCH=$(uname -m)
-case "$DL_ARCH" in
-  aarch64) DL_ARCH="arm64" ;;
-  x86_64)
-    # Rosetta detection
-    if [ "$DL_OS" = "darwin" ] && sysctl -n machdep.cpu.brand_string 2>/dev/null | grep -qi apple; then
-      DL_ARCH="arm64"
-    else
-      DL_ARCH="amd64"
-    fi
-    ;;
-esac
+# Prefer a CI-provided SMOKE_ARCH over `uname -m`: on windows-11-arm the base
+# MSYS2 `uname` is an emulated x86_64 binary that reports "x86_64", so uname would
+# request the amd64 archive and 404. The smoke workflow passes the true matrix
+# arch (arm64/amd64). Fall back to uname when SMOKE_ARCH is unset (local runs).
+if [ -n "${SMOKE_ARCH:-}" ]; then
+  DL_ARCH="$SMOKE_ARCH"
+else
+  DL_ARCH=$(uname -m)
+  case "$DL_ARCH" in
+    aarch64) DL_ARCH="arm64" ;;
+    x86_64)
+      # Rosetta detection
+      if [ "$DL_OS" = "darwin" ] && sysctl -n machdep.cpu.brand_string 2>/dev/null | grep -qi apple; then
+        DL_ARCH="arm64"
+      else
+        DL_ARCH="amd64"
+      fi
+      ;;
+  esac
+fi
 
 if [ "$DL_OS" = "darwin" ] || [ "$DL_OS" = "linux" ]; then
   DL_EXT="tar.gz"
