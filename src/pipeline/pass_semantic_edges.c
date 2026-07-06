@@ -663,21 +663,25 @@ static void vec_build_worker(int worker_id, void *ctx_ptr) {
         vc->funcs[f].tfidf_weights = weights;
         vc->funcs[f].tfidf_len = tfidf_len;
 
-        /* RI vector: sum of enriched token vectors weighted by IDF */
-        memset(&vc->funcs[f].ri_vec, 0, sizeof(cbm_sem_vec_t));
+        /* RI vector: sum of enriched token vectors weighted by IDF. Built in a
+         * LOCAL dense buffer; only the quantized code is retained per func
+         * (the resident dense floats were ~9.4 GB on the kernel). */
+        cbm_sem_vec_t ri_dense;
+        memset(&ri_dense, 0, sizeof(cbm_sem_vec_t));
         for (int t = 0; t < tc; t++) {
             const cbm_sem_vec_t *ri = cbm_sem_corpus_ri_vec(vc->corpus, tokens[t]);
             if (ri) {
                 float idf = cbm_sem_corpus_idf(vc->corpus, tokens[t]);
-                cbm_sem_vec_add_scaled(&vc->funcs[f].ri_vec, ri, idf);
+                cbm_sem_vec_add_scaled(&ri_dense, ri, idf);
             }
         }
-        cbm_sem_normalize(&vc->funcs[f].ri_vec);
+        cbm_sem_normalize(&ri_dense);
+        cbm_rsq_encode(ri_dense.v, &vc->funcs[f].ri_code);
 
         /* Int8 quantize into pre-allocated output array (parallel-safe) */
         uint8_t *qv = &vc->qvecs[(ptrdiff_t)f * CBM_SEM_DIM];
         for (int d = 0; d < CBM_SEM_DIM; d++) {
-            float v = vc->funcs[f].ri_vec.v[d];
+            float v = ri_dense.v[d];
             if (v > PSE_UNIT_POS) {
                 v = PSE_UNIT_POS;
             }
@@ -701,8 +705,11 @@ enum {
     SEM_MAX_CANDIDATES = 200,
 };
 
-/* Row of a hyperplane matrix: float[CBM_SEM_DIM]. */
-typedef float hyperplane_row_t[CBM_SEM_DIM];
+/* Row of a hyperplane matrix in the ROTATED (quantized) basis: LSH only
+ * needs signs of dots against random directions, and a random direction in
+ * the rotated basis is as random as one in the original — so signatures are
+ * computed from dequantized codes without keeping dense originals. */
+typedef float hyperplane_row_t[CBM_RSQ_DIM];
 
 typedef struct {
     cbm_sem_func_t *funcs;
@@ -721,11 +728,13 @@ static void sig_build_worker(int worker_id, void *ctx_ptr) {
             break;
         }
 
+        float dec[CBM_RSQ_DIM];
+        cbm_rsq_decode(&sc->funcs[f].ri_code, dec);
         uint64_t sig = 0;
         for (int h = 0; h < NUM_HYPERPLANES; h++) {
             float dot = 0.0F;
-            for (int d = 0; d < CBM_SEM_DIM; d++) {
-                dot += sc->funcs[f].ri_vec.v[d] * sc->hyperplanes[h][d];
+            for (int d = 0; d < CBM_RSQ_DIM; d++) {
+                dot += dec[d] * sc->hyperplanes[h][d];
             }
             if (dot > 0.0F) {
                 sig |= (PSE_ONE_ULL << h);
@@ -880,9 +889,13 @@ static void collect_worker(int worker_id, void *ctx_ptr) {
             const cbm_gbuf_node_t *n = cc->node_ptrs[i];
             decode_minhash(n->properties_json, &cc->funcs[i]);
             decode_struct_profile(n->properties_json, cc->funcs[i].struct_profile);
-            build_api_vec(cc->gbuf, n->id, &cc->funcs[i].api_vec);
-            build_type_vec(n->properties_json, &cc->funcs[i].type_vec);
-            build_deco_vec(n->properties_json, &cc->funcs[i].deco_vec);
+            cbm_sem_vec_t tmp_vec;
+            build_api_vec(cc->gbuf, n->id, &tmp_vec);
+            cbm_rsq_encode(tmp_vec.v, &cc->funcs[i].api_code);
+            build_type_vec(n->properties_json, &tmp_vec);
+            cbm_rsq_encode(tmp_vec.v, &cc->funcs[i].type_code);
+            build_deco_vec(n->properties_json, &tmp_vec);
+            cbm_rsq_encode(tmp_vec.v, &cc->funcs[i].deco_code);
         }
     }
 }
@@ -1101,8 +1114,8 @@ static hyperplane_row_t *phase5a_build_hyperplanes(void) {
         return NULL;
     }
     for (int h = 0; h < NUM_HYPERPLANES; h++) {
-        for (int d = 0; d < CBM_SEM_DIM; d++) {
-            uint64_t seed = XXH3_64bits_withSeed(&d, sizeof(d), (uint64_t)h * CBM_SEM_DIM);
+        for (int d = 0; d < CBM_RSQ_DIM; d++) {
+            uint64_t seed = XXH3_64bits_withSeed(&d, sizeof(d), (uint64_t)h * CBM_RSQ_DIM);
             hyperplanes[h][d] = ((float)(seed & UINT32_MAX) / (float)UINT32_MAX) - PSE_ROUND_BIAS;
         }
     }

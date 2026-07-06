@@ -5,6 +5,7 @@
  * proximity, diffuse, corpus lifecycle, get_config.
  */
 #include "test_framework.h"
+#include <semantic/rotsq.h>
 #include <semantic/semantic.h>
 
 #include <math.h>
@@ -338,9 +339,68 @@ TEST(sem_get_config_defaults) {
     PASS();
 }
 
+/* ── RaBitQ estimator quality (from-paper 4-bit quantization) ────── */
+
+/* Deterministic pseudo-random unit vectors; validates that the quantized
+ * inner-product estimator tracks the exact float IP within tight bounds.
+ * These bounds gate the semantic pass's use of the codes: cosine scores are
+ * thresholded at ~0.75, so the estimator error must be well under the
+ * decision margin for typical pairs. */
+TEST(sem_rotsq_ip_error_bounds) {
+    enum { N = 64 };
+    static float vecs[N][CBM_RSQ_IN_DIM];
+    static cbm_rsq_code_t codes[N];
+    uint32_t state = 0xC0FFEEu;
+    for (int i = 0; i < N; i++) {
+        double norm = 0.0;
+        for (int d = 0; d < CBM_RSQ_IN_DIM; d++) {
+            /* xorshift32 → roughly uniform in [-1, 1] */
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            vecs[i][d] = ((float)(state & 0xFFFFFF) / (float)0x7FFFFF) - 1.0F;
+            norm += (double)vecs[i][d] * (double)vecs[i][d];
+        }
+        float inv = norm > 0.0 ? (float)(1.0 / sqrt(norm)) : 0.0F;
+        for (int d = 0; d < CBM_RSQ_IN_DIM; d++) {
+            vecs[i][d] *= inv;
+        }
+        cbm_rsq_encode(vecs[i], &codes[i]);
+    }
+    double max_err = 0.0;
+    double sum_err = 0.0;
+    int pairs = 0;
+    for (int i = 0; i < N; i++) {
+        for (int j = i; j < N; j++) {
+            double exact = 0.0;
+            for (int d = 0; d < CBM_RSQ_IN_DIM; d++) {
+                exact += (double)vecs[i][d] * (double)vecs[j][d];
+            }
+            double est = (double)cbm_rsq_ip(&codes[i], &codes[j]);
+            double err = fabs(est - exact);
+            sum_err += err;
+            if (err > max_err) {
+                max_err = err;
+            }
+            pairs++;
+        }
+    }
+    double mean_err = sum_err / pairs;
+    /* Self-IP of a unit vector must estimate ~1. */
+    double self_est = (double)cbm_rsq_ip(&codes[0], &codes[0]);
+    ASSERT_TRUE(fabs(self_est - 1.0) < 0.05);
+    /* 4-bit RaBitQ-style SQ after rotation: expect mean error well under 1%
+     * of the unit scale and max under ~4% — comfortably inside the semantic
+     * threshold's decision margin. */
+    ASSERT_TRUE(mean_err < 0.01);
+    ASSERT_TRUE(max_err < 0.04);
+    PASS();
+}
+
 /* ── Suite ───────────────────────────────────────────────────────── */
 
 SUITE(semantic) {
+    RUN_TEST(sem_rotsq_ip_error_bounds);
     RUN_TEST(sem_tokenize_camel);
     RUN_TEST(sem_tokenize_snake);
     RUN_TEST(sem_tokenize_dot);
