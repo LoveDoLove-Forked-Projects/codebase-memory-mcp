@@ -1618,12 +1618,11 @@ TEST(store_coverage_roundtrip_prune_shadow) {
     ASSERT_STR_EQ(got[0].detail, "4-7");
     cbm_store_free_coverage(got, n);
 
-    /* Shadow miss-graph materialized under "test::coverage":
+    /* Shadow miss-graph materialized under "test::missed":
      * Project → Folder(src) → File(a.py){kind,detail}. */
     cbm_node_t *nodes = NULL;
     int nc = 0;
-    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::coverage", "File", &nodes, &nc),
-              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::missed", "File", &nodes, &nc), CBM_STORE_OK);
     ASSERT_EQ(nc, 1);
     ASSERT_STR_EQ(nodes[0].file_path, "src/a.py");
     ASSERT_NOT_NULL(strstr(nodes[0].properties_json, "\"kind\":\"parse_partial\""));
@@ -1631,7 +1630,7 @@ TEST(store_coverage_roundtrip_prune_shadow) {
     cbm_store_free_nodes(nodes, nc);
     nodes = NULL;
     nc = 0;
-    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::coverage", "Folder", &nodes, &nc),
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::missed", "Folder", &nodes, &nc),
               CBM_STORE_OK);
     ASSERT_EQ(nc, 1);
     ASSERT_STR_EQ(nodes[0].name, "src");
@@ -1646,8 +1645,7 @@ TEST(store_coverage_roundtrip_prune_shadow) {
     free(got);
     nodes = NULL;
     nc = 0;
-    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::coverage", "File", &nodes, &nc),
-              CBM_STORE_OK);
+    ASSERT_EQ(cbm_store_find_nodes_by_label(s, "test::missed", "File", &nodes, &nc), CBM_STORE_OK);
     ASSERT_EQ(nc, 0);
     cbm_store_free_nodes(nodes, nc);
 

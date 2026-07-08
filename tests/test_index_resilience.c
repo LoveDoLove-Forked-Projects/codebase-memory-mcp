@@ -390,12 +390,12 @@ TEST(index_parse_partial_reported) {
     ASSERT_NOT_NULL(strstr(qresp, "parse_partial"));
     free(qresp);
 
-    /* The miss GRAPH: the same signal is queryable as a file-structure graph
-     * via query_graph(graph="coverage") — exactly the query the tool
+    /* The missed GRAPH: the same signal is queryable as a file-structure
+     * graph via query_graph(graph="missed") — exactly the query the tool
      * description advertises — and it lives under the shadow project, so the
      * REAL code graph gained no coverage rows. */
     snprintf(qargs, sizeof(qargs),
-             "{\"project\":\"%s\",\"graph\":\"coverage\",\"query\":\"MATCH (f:File) WHERE "
+             "{\"project\":\"%s\",\"graph\":\"missed\",\"query\":\"MATCH (f:File) WHERE "
              "f.kind = \\\"parse_partial\\\" RETURN f.file_path, f.detail\"}",
              lp.project);
     char *gresp = cbm_mcp_handle_tool(lp.srv, "query_graph", qargs);
@@ -435,7 +435,19 @@ TEST(index_parse_partial_clears_on_fix) {
     }
     rh_to_fwd_slashes(lp.tmpdir);
 
-    ri_write_text(lp.tmpdir, "flaky.py", "def ok():\n    return 1\n\ndef broken(:\n    pass\n");
+    /* The #ifdef-split-brace pattern: an UNRECOVERED miss (the first branch's
+     * `guarded` never becomes a def), so the flag survives recovery
+     * subtraction. A `def broken(:`-style fixture would NOT work here — its
+     * def is recovered and the region is dropped. */
+    ri_write_text(lp.tmpdir, "flaky.c",
+                  "void ok_before(void) { }\n"
+                  "#ifdef A\n"
+                  "static int guarded(int x) {\n"
+                  "#else\n"
+                  "static int guarded_alt(int x) {\n"
+                  "#endif\n"
+                  "    return x + 1;\n"
+                  "}\n");
     ri_write_text(lp.tmpdir, "good.py", "def alpha():\n    return 1\n");
 
     char *resp = NULL;
@@ -454,13 +466,17 @@ TEST(index_parse_partial_clears_on_fix) {
     snprintf(qargs, sizeof(qargs), "{\"project\":\"%s\"}", lp.project);
     char *cov1 = cbm_mcp_handle_tool(lp.srv, "get_index_coverage", qargs);
     ASSERT_NOT_NULL(cov1);
-    ASSERT_NOT_NULL(strstr(cov1, "flaky.py"));
+    ASSERT_NOT_NULL(strstr(cov1, "flaky.c"));
     free(cov1);
 
     /* Fix the file; ensure a newer mtime so change detection can't miss it. */
     struct timespec ts = {0, INCR_FIX_SLEEP_NS};
     nanosleep(&ts, NULL);
-    ri_write_text(lp.tmpdir, "flaky.py", "def ok():\n    return 1\n\ndef fixed():\n    return 2\n");
+    ri_write_text(lp.tmpdir, "flaky.c",
+                  "void ok_before(void) { }\n"
+                  "static int fixed(int x) {\n"
+                  "    return x + 1;\n"
+                  "}\n");
 
     /* Re-index WITHOUT deleting the DB → routes through the incremental path. */
     char iargs[700];
@@ -471,7 +487,7 @@ TEST(index_parse_partial_clears_on_fix) {
 
     char *cov2 = cbm_mcp_handle_tool(lp.srv, "get_index_coverage", qargs);
     ASSERT_NOT_NULL(cov2);
-    ASSERT_NULL(strstr(cov2, "flaky.py"));
+    ASSERT_NULL(strstr(cov2, "flaky.c"));
     free(cov2);
 
     store = cbm_store_open_path(lp.dbpath);

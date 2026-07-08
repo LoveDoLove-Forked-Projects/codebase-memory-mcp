@@ -76,14 +76,27 @@ static const char *C_CLEAN = "#include <stdio.h>\n"
                              "    return x + 1;\n"
                              "}\n";
 
-static const char *PY_BROKEN = "def ok():\n"
-                               "    return 1\n"
-                               "\n"
-                               "def broken(:\n"
-                               "    pass\n"
-                               "\n"
-                               "def ok2():\n"
-                               "    return 2\n";
+/* `def broken(:` parses with an ERROR region, but tree-sitter error recovery
+ * still yields the `broken` function def — a DEFINITELY RECOVERED miss. */
+static const char *PY_BROKEN_RECOVERED = "def ok():\n"
+                                         "    return 1\n"
+                                         "\n"
+                                         "def broken(:\n"
+                                         "    pass\n"
+                                         "\n"
+                                         "def ok2():\n"
+                                         "    return 2\n";
+
+/* Pure operator garbage between defs: an ERROR region no def walker can
+ * recover anything from — a genuine, unrecovered miss. */
+static const char *PY_GARBAGE = "def ok():\n"
+                                "    return 1\n"
+                                "\n"
+                                "%%% ((( garbage ))) %%%\n"
+                                "??? !!!\n"
+                                "\n"
+                                "def ok2():\n"
+                                "    return 2\n";
 
 static const char *PY_CLEAN = "def ok():\n"
                               "    return 1\n"
@@ -150,13 +163,27 @@ TEST(c_clean_file_not_flagged) {
     PASS();
 }
 
-TEST(py_syntax_error_sets_parse_incomplete) {
-    CBMFileResult *r = do_extract(PY_BROKEN, CBM_LANG_PYTHON, "broken.py");
+TEST(py_unrecovered_garbage_sets_parse_incomplete) {
+    CBMFileResult *r = do_extract(PY_GARBAGE, CBM_LANG_PYTHON, "garbage.py");
     ASSERT_NOT_NULL(r);
     ASSERT_TRUE(r->parse_incomplete);
     ASSERT_GTE(r->error_region_count, 1);
     ASSERT_NOT_NULL(r->error_ranges);
     ASSERT_TRUE(has_def(r, "ok")); /* partial: clean defs still extracted */
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(py_recovered_def_not_flagged) {
+    /* Recovery subtraction: `def broken(:` produces an ERROR region, but the
+     * def walker still recovers `broken` covering the whole region — the
+     * construct IS in the graph, so flagging it would be a false miss. */
+    CBMFileResult *r = do_extract(PY_BROKEN_RECOVERED, CBM_LANG_PYTHON, "broken.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "broken")); /* the recovery that justifies unflagging */
+    ASSERT_FALSE(r->parse_incomplete);
+    ASSERT_EQ(r->error_region_count, 0);
+    ASSERT_NULL(r->error_ranges);
     cbm_free_result(r);
     PASS();
 }
@@ -172,17 +199,17 @@ TEST(py_clean_file_not_flagged) {
 }
 
 TEST(error_region_cap_is_honored) {
-    /* Pathological input: many separate broken defs interleaved with valid
-     * ones. The collector must stay bounded by its 64-region cap (matches
-     * CBM_MAX_ERROR_REGIONS in cbm.c) — pathological input can't blow up the
-     * report, and the flag itself still fires. */
-    enum { BROKEN_DEFS = 200, LINE_CAP = 64 };
-    char *src = (char *)malloc(BROKEN_DEFS * 96 + 1);
+    /* Pathological input: many separate unrecoverable garbage blocks
+     * interleaved with valid defs. The collector must stay bounded by its
+     * 64-region cap (matches CBM_MAX_ERROR_REGIONS in cbm.c) — pathological
+     * input can't blow up the report, and the flag itself still fires. */
+    enum { GARBAGE_BLOCKS = 200, LINE_CAP = 64 };
+    char *src = (char *)malloc(GARBAGE_BLOCKS * 96 + 1);
     ASSERT_NOT_NULL(src);
     size_t off = 0;
-    for (int i = 0; i < BROKEN_DEFS; i++) {
-        off += (size_t)snprintf(src + off, 96,
-                                "def ok%d():\n    return %d\ndef broken%d(:\n    pass\n", i, i, i);
+    for (int i = 0; i < GARBAGE_BLOCKS; i++) {
+        off += (size_t)snprintf(
+            src + off, 96, "def ok%d():\n    return %d\n%%%%%% garbage%d ((( %%%%%%\n", i, i, i);
     }
     CBMFileResult *r = do_extract(src, CBM_LANG_PYTHON, "many_errors.py");
     free(src);
@@ -195,6 +222,29 @@ TEST(error_region_cap_is_honored) {
     PASS();
 }
 
+/* Trailing recovered functions AFTER the failed #ifdef region must not
+ * unflag it: recovery evidence must originate INSIDE the region, and the
+ * unrecovered lines (the first branch's `guarded`) keep it flagged. */
+TEST(c_trailing_recovered_defs_keep_flag) {
+    const char *src = "void ok_before(void) { }\n"
+                      "#ifdef A\n"
+                      "static int guarded(int x) {\n"
+                      "#else\n"
+                      "static int guarded_alt(int x) {\n"
+                      "#endif\n"
+                      "    return x + 1;\n"
+                      "}\n"
+                      "void ok_after(void) { }\n"
+                      "static int nested_ok(int y) { return y; }\n";
+    CBMFileResult *r = do_extract(src, CBM_LANG_C, "probe.c");
+    ASSERT_NOT_NULL(r);
+    ASSERT_TRUE(has_def(r, "guarded_alt")); /* partial recovery inside the region */
+    ASSERT_TRUE(r->parse_incomplete);       /* ...but `guarded` is still lost */
+    ASSERT_GTE(r->error_region_count, 1);
+    cbm_free_result(r);
+    PASS();
+}
+
 /* ── Suite ────────────────────────────────────────────────────────────────── */
 
 SUITE(parse_coverage) {
@@ -202,7 +252,9 @@ SUITE(parse_coverage) {
     RUN_TEST(c_ifdef_split_brace_neighbors_still_extracted);
     RUN_TEST(c_error_range_points_at_failed_region);
     RUN_TEST(c_clean_file_not_flagged);
-    RUN_TEST(py_syntax_error_sets_parse_incomplete);
+    RUN_TEST(py_unrecovered_garbage_sets_parse_incomplete);
+    RUN_TEST(py_recovered_def_not_flagged);
     RUN_TEST(py_clean_file_not_flagged);
     RUN_TEST(error_region_cap_is_honored);
+    RUN_TEST(c_trailing_recovered_defs_keep_flag);
 }

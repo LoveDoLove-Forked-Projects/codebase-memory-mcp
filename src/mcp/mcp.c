@@ -321,7 +321,7 @@ static const tool_def_t TOOLS[] = {
      "indexed at all: oversized/read/parse failures) and 'parse_partial' (indexed, but "
      "constructs inside the listed line ranges could not be parsed and MAY be missing from "
      "the graph). Query the persisted signal any time via the get_index_coverage tool or "
-     "structurally via query_graph(graph=\"coverage\"). Both signals are best-effort: absence "
+     "structurally via query_graph(graph=\"missed\"). Both signals are best-effort: absence "
      "of a flag is NOT a completeness guarantee; prefer grep inside flagged ranges.",
      "{\"type\":\"object\",\"properties\":{\"repo_path\":{\"type\":\"string\",\"description\":"
      "\"Path to the repository\"},"
@@ -395,8 +395,8 @@ static const tool_def_t TOOLS[] = {
      "Find all hot-path candidates in one query, e.g. MATCH (f:Function) WHERE "
      "f.transitive_loop_depth >= 3 OR f.linear_scan_in_loop >= 1 RETURN f.qualified_name, "
      "f.transitive_loop_depth, f.linear_scan_in_loop ORDER BY f.transitive_loop_depth DESC. "
-     "COVERAGE GRAPH: pass graph=\"coverage\" to query the best-effort miss graph instead — "
-     "the file structure of files the indexer could NOT fully cover (Project → Folder → "
+     "MISSED GRAPH: pass graph=\"missed\" to query the best-effort miss graph instead — the "
+     "file structure of ONLY the files the indexer could NOT fully index (Project → Folder → "
      "File nodes with CONTAINS_FOLDER/CONTAINS_FILE edges; each File carries kind "
      "(\"parse_partial\" = indexed but constructs in the flagged line ranges MAY be missing; "
      "or a skip phase) and detail (the line ranges / reason)). Example: MATCH (f:File) WHERE "
@@ -404,9 +404,9 @@ static const tool_def_t TOOLS[] = {
      "NOT a completeness guarantee.",
      "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Cypher "
      "query\"},\"project\":{\"type\":\"string\"},"
-     "\"graph\":{\"type\":\"string\",\"enum\":[\"code\",\"coverage\"],\"default\":\"code\","
+     "\"graph\":{\"type\":\"string\",\"enum\":[\"code\",\"missed\"],\"default\":\"code\","
      "\"description\":\"Which graph to query: the code knowledge graph (default) or the "
-     "indexing-coverage miss graph (files not fully indexed, as a file-structure graph).\"},"
+     "missed graph (only files not fully indexed, laid out as their file structure).\"},"
      "\"max_rows\":{\"type\":\"integer\","
      "\"description\":"
      "\"Optional row limit. Default: unlimited up to a 100k row "
@@ -507,7 +507,7 @@ static const tool_def_t TOOLS[] = {
      "completeness on a file: if a file is listed, ALSO grep it (especially the flagged ranges). "
      "IMPORTANT: absence from this list is NOT a completeness guarantee — the signal only marks "
      "what the indexer can detect. For structural queries over the misses use "
-     "query_graph(graph=\"coverage\").",
+     "query_graph(graph=\"missed\").",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
 
@@ -2087,20 +2087,20 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
     cbm_store_t *store = resolve_store(srv, project);
     int max_rows = cbm_mcp_get_int_arg(args, "max_rows", 0);
 
-    /* graph="coverage" (#963): run the SAME cypher against the derived
-     * miss-graph view (shadow project "<project>::coverage") instead of the
+    /* graph="missed" (#963): run the SAME cypher against the derived
+     * miss-graph view (shadow project "<project>::missed") instead of the
      * code graph — file structure of not-fully-indexed files only. */
     char *graph_arg = cbm_mcp_get_string_arg(args, "graph");
-    bool coverage_graph = graph_arg && strcmp(graph_arg, "coverage") == 0;
+    bool missed_graph = graph_arg && strcmp(graph_arg, "missed") == 0;
     free(graph_arg);
 
     if (!query) {
         free(project);
         return cbm_mcp_text_result("query is required", true);
     }
-    if (coverage_graph && !project) {
+    if (missed_graph && !project) {
         free(query);
-        return cbm_mcp_text_result("project is required when graph=\"coverage\"", true);
+        return cbm_mcp_text_result("project is required when graph=\"missed\"", true);
     }
     if (!store) {
         char *_err = build_project_list_error("project not found or not indexed");
@@ -2120,7 +2120,7 @@ static char *handle_query_graph(cbm_mcp_server_t *srv, const char *args) {
 
     char covproj[CBM_SZ_512];
     const char *cypher_project = project;
-    if (coverage_graph) {
+    if (missed_graph) {
         cbm_store_coverage_shadow_project(covproj, sizeof(covproj), project);
         cypher_project = covproj;
     }

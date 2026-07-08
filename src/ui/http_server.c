@@ -1369,6 +1369,7 @@ static double layout_radius(const cbm_layout_result_t *r) {
 static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     char project[256] = {0};
     char max_str[32] = {0};
+    char graph_str[32] = {0};
 
     if (!cbm_http_query_param(req->query, "project", project, (int)sizeof(project)) ||
         project[0] == '\0') {
@@ -1381,6 +1382,21 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
         int v = atoi(max_str);
         if (v > 0)
             max_nodes = v;
+    }
+
+    /* graph=missed (#963): lay out the derived miss graph (shadow project
+     * "<name>::missed" inside the SAME db file) instead of the code graph —
+     * only files the indexer could not fully cover, as their file structure.
+     * The db file still resolves from the validated base project name. */
+    bool missed_graph = false;
+    if (cbm_http_query_param(req->query, "graph", graph_str, (int)sizeof(graph_str))) {
+        missed_graph = strcmp(graph_str, "missed") == 0;
+    }
+    char scoped_project[320];
+    if (missed_graph) {
+        cbm_store_coverage_shadow_project(scoped_project, sizeof(scoped_project), project);
+    } else {
+        snprintf(scoped_project, sizeof(scoped_project), "%s", project);
     }
 
     char db_path[1024];
@@ -1398,7 +1414,7 @@ static void handle_layout(cbm_http_conn_t *c, const cbm_http_req_t *req) {
     }
 
     cbm_layout_result_t *layout =
-        cbm_layout_compute(store, project, CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
+        cbm_layout_compute(store, scoped_project, CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
 
     /* Find linked projects from CROSS_* edges. Keep `store` open through the
      * linked-projects loop below so we can resolve target Route QNs against

@@ -725,6 +725,72 @@ static void cbm_collect_error_regions(TSNode n, cbm_error_regions_t *acc) {
     }
 }
 
+/* Recovery subtraction (#963): tree-sitter error recovery plus the
+ * ERROR-descending def walker often still extract constructs INSIDE a failed
+ * region (verified: a function in an #ifdef-split ERROR region and even a
+ * `def broken(:` both came back as defs). A region whose every line is
+ * covered by definitions that START inside it is definitely recovered — its
+ * constructs ARE in the graph — so flagging it would be a false miss.
+ * Container defs (Module/Package) are ignored: a file-spanning Module node is
+ * not evidence the region's constructs survived. Conservative: partially
+ * covered regions stay flagged. */
+static bool cbm_region_is_recovered(uint32_t rs, uint32_t re, const CBMDefArray *defs) {
+    enum { MAX_COVER_DEFS = 256 };
+    uint32_t starts[MAX_COVER_DEFS];
+    uint32_t ends[MAX_COVER_DEFS];
+    int n = 0;
+    for (int i = 0; i < defs->count && n < MAX_COVER_DEFS; i++) {
+        const CBMDefinition *d = &defs->items[i];
+        if (!d->label || strcmp(d->label, "Module") == 0 || strcmp(d->label, "Package") == 0) {
+            continue;
+        }
+        if (d->start_line < rs || d->start_line > re) {
+            continue; /* recovery evidence must originate inside the region */
+        }
+        starts[n] = d->start_line;
+        ends[n] = d->end_line < d->start_line ? d->start_line : d->end_line;
+        n++;
+    }
+    if (n == 0) {
+        return false;
+    }
+    /* Insertion-sort by start, then sweep for gaps in [rs, re]. */
+    for (int i = 1; i < n; i++) {
+        uint32_t s = starts[i];
+        uint32_t e = ends[i];
+        int j = i - 1;
+        while (j >= 0 && starts[j] > s) {
+            starts[j + 1] = starts[j];
+            ends[j + 1] = ends[j];
+            j--;
+        }
+        starts[j + 1] = s;
+        ends[j + 1] = e;
+    }
+    uint32_t covered_to = rs - 1;
+    for (int i = 0; i < n; i++) {
+        if (starts[i] > covered_to + 1) {
+            return false; /* uncovered gap */
+        }
+        if (ends[i] > covered_to) {
+            covered_to = ends[i];
+        }
+    }
+    return covered_to >= re;
+}
+
+static void cbm_subtract_recovered_regions(cbm_error_regions_t *regs, const CBMDefArray *defs) {
+    int kept = 0;
+    for (int i = 0; i < regs->count; i++) {
+        if (!cbm_region_is_recovered(regs->starts[i], regs->ends[i], defs)) {
+            regs->starts[kept] = regs->starts[i];
+            regs->ends[kept] = regs->ends[i];
+            kept++;
+        }
+    }
+    regs->count = kept;
+}
+
 /* Serialize collected regions as "start-end,start-end,..." into the arena. */
 static const char *cbm_error_ranges_str(CBMArena *a, const cbm_error_regions_t *regs) {
     if (regs->count <= 0) {
@@ -842,22 +908,6 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     }
 
     TSNode root = ts_tree_root_node(tree);
-
-    /* Best-effort parse-coverage signal (#963): flag files whose tree contains
-     * ERROR/MISSING nodes — constructs inside those regions are silently absent
-     * from the graph. Detection aid only: the absence of this flag is NOT a
-     * completeness guarantee. */
-    if (ts_node_has_error(root)) {
-        result->parse_incomplete = true;
-        cbm_error_regions_t regs = {{0}, {0}, 0};
-        if (strcmp(ts_node_type(root), "ERROR") == 0) {
-            cbm_error_regions_push(&regs, root); /* whole file unparseable */
-        } else {
-            cbm_collect_error_regions(root, &regs);
-        }
-        result->error_region_count = regs.count;
-        result->error_ranges = cbm_error_ranges_str(a, &regs);
-    }
 
     // Compute module QN. Java/Go derive the module from the CONTAINING
     // DIRECTORY (package semantics) rather than baking the filename stem in,
@@ -1107,6 +1157,26 @@ static CBMFileResult *cbm_extract_file_impl(const char *source, int source_len,
     free(has_guarded);
 
     uint64_t t2 = now_ns();
+
+    /* Best-effort parse-coverage signal (#963): flag files whose tree contains
+     * ERROR/MISSING regions. Computed AFTER extraction so definite recovery is
+     * subtracted first — a region fully re-extracted as definitions is not a
+     * miss, and a fully recovered file is not flagged at all. Detection aid
+     * only: the absence of this flag is NOT a completeness guarantee. */
+    if (ts_node_has_error(root)) {
+        cbm_error_regions_t regs = {{0}, {0}, 0};
+        if (strcmp(ts_node_type(root), "ERROR") == 0) {
+            cbm_error_regions_push(&regs, root); /* whole file unparseable */
+        } else {
+            cbm_collect_error_regions(root, &regs);
+        }
+        cbm_subtract_recovered_regions(&regs, &result->defs);
+        if (regs.count > 0) {
+            result->parse_incomplete = true;
+            result->error_region_count = regs.count;
+            result->error_ranges = cbm_error_ranges_str(a, &regs);
+        }
+    }
 
     result->imports_count = result->imports.count;
 

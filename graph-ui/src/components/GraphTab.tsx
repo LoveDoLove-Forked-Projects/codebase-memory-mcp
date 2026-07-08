@@ -102,6 +102,11 @@ export function GraphTab({ project }: GraphTabProps) {
   const [enabledLabels, setEnabledLabels] = useState<Set<string>>(new Set());
   const [enabledEdgeTypes, setEnabledEdgeTypes] = useState<Set<string>>(new Set());
 
+  /* Missed graph (#963): render the file structure of files the indexer
+   * could not fully cover instead of the code graph. Server-side option
+   * (`graph=missed` on /api/layout) — toggling refetches. */
+  const [missedView, setMissedView] = useState(false);
+
   /* Dead-code view: recolor by status + status-based filters */
   const [deadCodeView, setDeadCodeView] = useState(false);
   const [showOnlyDead, setShowOnlyDead] = useState(false);
@@ -184,11 +189,11 @@ export function GraphTab({ project }: GraphTabProps) {
   /* …and fetch only once budget and project agree (one fetch per change). */
   useEffect(() => {
     if (project && budget.project === project) {
-      fetchOverview(project, budget.value);
+      fetchOverview(project, budget.value, missedView ? "missed" : "code");
       setHighlightedIds(null);
       setSelectedPath(null);
     }
-  }, [project, budget, fetchOverview]);
+  }, [project, budget, missedView, fetchOverview]);
 
   /* Fetch git remote metadata for GitHub deep-links */
   useEffect(() => {
@@ -351,6 +356,8 @@ export function GraphTab({ project }: GraphTabProps) {
           onToggleShowOnlyDead={() => setShowOnlyDead((v) => !v)}
           onToggleHideEntryPoints={() => setHideEntryPoints((v) => !v)}
           onToggleHideTests={() => setHideTests((v) => !v)}
+          missedView={missedView}
+          onToggleMissedView={() => setMissedView((v) => !v)}
         />
         <Sidebar
           nodes={filteredData.nodes}

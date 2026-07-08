@@ -1849,7 +1849,7 @@ int cbm_store_delete_file_hashes(cbm_store_t *s, const char *project) {
 /* ── Index coverage (#963) ──────────────────────────────────────── */
 
 void cbm_store_coverage_shadow_project(char *dst, size_t dstsz, const char *project) {
-    snprintf(dst, dstsz, "%s::coverage", project);
+    snprintf(dst, dstsz, "%s::missed", project);
 }
 
 /* Minimal JSON string escape (quotes, backslashes, control chars → space). */
@@ -1870,9 +1870,9 @@ static void cov_json_escape(char *dst, size_t dstsz, const char *src) {
 }
 
 /* Rebuild the derived miss-GRAPH view under the shadow project
- * "<project>::coverage": ONLY the not-fully-indexed files, laid out as the
+ * "<project>::missed": ONLY the not-fully-indexed files, laid out as the
  * file structure (Project → Folder chain → File), each File carrying
- * {kind, detail}. Queryable via query_graph(graph="coverage") with zero
+ * {kind, detail}. Queryable via query_graph(graph="missed") with zero
  * cypher-engine changes; the real project's graph gains no rows. Derived
  * data — rebuilt from the authoritative (post-prune) table contents. */
 static void cov_rebuild_shadow_graph(cbm_store_t *s, const char *project) {

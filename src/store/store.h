@@ -423,7 +423,7 @@ int cbm_store_coverage_replace(cbm_store_t *s, const char *project, const cbm_co
 int cbm_store_coverage_get(cbm_store_t *s, const char *project, cbm_coverage_row_t **out,
                            int *count);
 
-/* Name of the derived miss-graph shadow project ("<project>::coverage").
+/* Name of the derived miss-graph shadow project ("<project>::missed").
  * cbm_store_coverage_replace materializes the coverage rows as a file-
  * structure graph (Project → Folder → File{kind, detail}) under this project
  * name — queryable via the normal cypher path without touching the real

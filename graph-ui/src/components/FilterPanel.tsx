@@ -22,6 +22,9 @@ interface FilterPanelProps {
   onToggleShowOnlyDead: () => void;
   onToggleHideEntryPoints: () => void;
   onToggleHideTests: () => void;
+  /* Missed graph (#963): file structure of not-fully-indexed files */
+  missedView: boolean;
+  onToggleMissedView: () => void;
 }
 
 /* Checkbox row matching the existing "Show labels" toggle style */
@@ -76,6 +79,8 @@ export function FilterPanel({
   onToggleShowOnlyDead,
   onToggleHideEntryPoints,
   onToggleHideTests,
+  missedView,
+  onToggleMissedView,
 }: FilterPanelProps) {
   const { labelCounts, edgeTypeCounts, statusCounts } = useMemo(() => {
     const lc = new Map<string, number>();
@@ -162,6 +167,27 @@ export function FilterPanel({
           )}
         </div>
       </ScrollArea>
+
+      {/* Missed graph (#963): swaps the layout to the file structure of files
+          the indexer could not fully cover (best-effort signal). */}
+      <div className="px-4 pt-2 border-t border-border/30 space-y-2 shrink-0">
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-foreground/30 uppercase tracking-widest">
+            Graph
+          </span>
+        </div>
+        <CheckRow
+          checked={missedView}
+          onToggle={onToggleMissedView}
+          label="Missed files (not fully indexed)"
+        />
+        {missedView && (
+          <p className="text-[9px] leading-snug text-foreground/30">
+            Best-effort: files with unparseable regions or skips. Empty = no
+            known misses (not a completeness guarantee).
+          </p>
+        )}
+      </div>
 
       {/* Dead-code view */}
       <div className="px-4 pt-2 border-t border-border/30 space-y-2 shrink-0">
