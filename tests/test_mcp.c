@@ -1755,6 +1755,80 @@ TEST(search_code_scoped_path_with_spaces_issue687) {
     PASS();
 }
 
+#ifdef _WIN32
+/* Issue #903 follow-up: scoped search_code on Windows writes a UTF-8 filelist
+ * containing absolute source paths, then reads it back through PowerShell.
+ * Windows PowerShell 5.1 treats UTF-8 without BOM as ANSI unless told
+ * otherwise, so a non-ASCII project root can be mojibaked before
+ * Select-String sees the LiteralPath. */
+TEST(search_code_scoped_path_with_cjk_root_issue903) {
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_srch_cjk_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+
+    char proj_dir[640];
+    snprintf(proj_dir, sizeof(proj_dir), "%s/%s", tmp,
+             "\xE4\xB8\xAD\xE6\x96\x87\xE9\xA1\xB9\xE7\x9B\xAE");
+    if (!cbm_mkdir_p(proj_dir, 0755)) {
+        cbm_rmdir(tmp);
+        FAIL("cannot create CJK project dir");
+    }
+
+    char src_path[768];
+    snprintf(src_path, sizeof(src_path), "%s/main.go", proj_dir);
+    FILE *fp = cbm_fopen(src_path, "wb");
+    if (!fp) {
+        cbm_rmdir(proj_dir);
+        cbm_rmdir(tmp);
+        FAIL("cannot write source file under CJK path");
+    }
+    fprintf(fp, "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n");
+    fclose(fp);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *proj = "cjk-search";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, proj_dir);
+
+    cbm_node_t n = {.project = proj,
+                    .label = "Function",
+                    .name = "HandleRequest",
+                    .qualified_name = "cjk-search.main.HandleRequest",
+                    .file_path = "main.go",
+                    .start_line = 3,
+                    .end_line = 5};
+    ASSERT_GT(cbm_store_upsert_node(st, &n), 0);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":903,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\","
+             "\"arguments\":{\"pattern\":\"HandleRequest\",\"project\":\"cjk-search\"}}}");
+    ASSERT_NOT_NULL(resp);
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+
+    int grep_matches = -1;
+    const char *g = strstr(inner, "\"total_grep_matches\":");
+    if (g) {
+        sscanf(g, "\"total_grep_matches\":%d", &grep_matches);
+    }
+    ASSERT_TRUE(grep_matches > 0);
+
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cbm_unlink(src_path);
+    cbm_rmdir(proj_dir);
+    cbm_rmdir(tmp);
+    PASS();
+}
+#endif
+
 /* Shared fixture for the path_filter prefilter tests (PR #756 distilled):
  * a project with two indexed files that both contain the search pattern —
  * src/handler.go (inside the filter) and vendor/other.go (outside it). */
@@ -5210,6 +5284,9 @@ SUITE(mcp) {
     RUN_TEST(tool_search_code_no_project);
     RUN_TEST(search_code_multi_word);
     RUN_TEST(search_code_scoped_path_with_spaces_issue687);
+#ifdef _WIN32
+    RUN_TEST(search_code_scoped_path_with_cjk_root_issue903);
+#endif
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
     RUN_TEST(search_code_invalid_regex_errors_issue283);
