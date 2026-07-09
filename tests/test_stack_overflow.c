@@ -512,6 +512,35 @@ TEST(lsp_python_deep_expression_no_crash) {
     PASS();
 }
 
+TEST(lsp_perl_deep_expression_no_crash) {
+    /* Deeply nested Perl call expressions f(f(f(...f(1)...))). Unlike the
+     * Java/C++ cases, the overflow here is NOT in the LSP walk — it is in
+     * tree-sitter's own GLR parser: stack_node_add_link (vendored
+     * ts_runtime/src/stack.c) recurses once per nesting level while merging the
+     * ambiguous parse-stack heads that Perl's `f(...)` grammar produces, blowing
+     * a small (1 MB Windows) stack during the parse, before any LSP walk runs.
+     * The CBM_PERL_MAX_PARSE_NESTING pre-parse guard in cbm_extract_file skips
+     * such input so it never reaches tree-sitter. See
+     * lsp_java_deep_nesting_no_crash on the depth choice. */
+    const int DEPTH = 30000;
+    size_t sz = (size_t)DEPTH * 3 + 256;
+    char *src = malloc(sz);
+    ASSERT_NOT_NULL(src);
+    char *p = src;
+    p += snprintf(p, sz, "sub f { return $_[0]; }\nsub g { return ");
+    for (int i = 0; i < DEPTH; i++) {
+        *p++ = 'f';
+        *p++ = '(';
+    }
+    *p++ = '1';
+    memset(p, ')', DEPTH);
+    p += DEPTH;
+    snprintf(p, sz - (size_t)(p - src), "; }\n");
+    ASSERT_FALSE(so_extract_crashes(src, CBM_LANG_PERL, "deep.pl"));
+    free(src);
+    PASS();
+}
+
 TEST(lsp_java_lambda_args_exceed_params_no_crash) {
     /* A call with MORE arguments than the resolved method's declared params:
      * bind_lambda_args indexed the NULL-terminated signature param_types array
@@ -649,6 +678,7 @@ SUITE(stack_overflow) {
     RUN_TEST(lsp_java_lambda_args_exceed_params_no_crash);
     RUN_TEST(lsp_cpp_deep_expression_no_crash);
     RUN_TEST(lsp_python_deep_expression_no_crash);
+    RUN_TEST(lsp_perl_deep_expression_no_crash);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);
     RUN_TEST(lsp_python_deep_nesting_no_crash);
     RUN_TEST(lsp_go_deep_nesting_no_crash);
