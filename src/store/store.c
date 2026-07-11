@@ -828,6 +828,31 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
 
 /* ── Integrity check ───────────────────────────────────────────── */
 
+/* Deep integrity: the shallow check above only sanity-checks the projects
+ * table, so page-level corruption (torn artifacts, #895) sails through.
+ * quick_check(1) walks the btrees and stops at the first error. Used on
+ * rare paths only (artifact import) — cost is proportional to DB size. */
+bool cbm_store_check_integrity_deep(cbm_store_t *s) {
+    if (!cbm_store_check_integrity(s)) {
+        return false;
+    }
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db, "PRAGMA quick_check(1);", CBM_NOT_FOUND, &stmt, NULL) !=
+        SQLITE_OK) {
+        return false;
+    }
+    bool ok = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *res = (const char *)sqlite3_column_text(stmt, 0);
+        ok = res && strcmp(res, "ok") == 0;
+        if (!ok) {
+            (void)fprintf(stderr, "ERROR store.corrupt quick_check=%s\n", res ? res : "(null)");
+        }
+    }
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
 bool cbm_store_check_integrity(cbm_store_t *s) {
     if (!s || !s->db) {
         return false;
