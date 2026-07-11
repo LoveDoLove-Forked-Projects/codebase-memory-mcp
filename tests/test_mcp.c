@@ -4870,6 +4870,124 @@ static int idxpar_recovery_check(const char *repo_dir) {
 }
 #endif /* !_WIN32 */
 
+/* #773: SIGABRT (invalid free in ts_stack_delete via
+ * cbm_destroy_thread_parser) on the SECOND index_repository in one server
+ * process, once both repos take the PARALLEL path (~30+ files). The
+ * supervisor masks this on the default MCP path (fresh worker process per
+ * index); the in-process pipeline — CBM_INDEX_SUPERVISOR=0, and every
+ * embedded/test consumer — dies. Forked child so the abort cannot kill the
+ * runner; ASan legs print the exact bad free. */
+enum {
+    IDX773_OK = 0,
+    IDX773_FIRST_FAILED = 71,  /* first index didn't return indexed */
+    IDX773_SECOND_FAILED = 72, /* second index didn't return indexed */
+};
+
+#ifndef _WIN32
+static void idx773_write_py_repo(const char *dir, int files, int variant) {
+    for (int i = 0; i < files; i++) {
+        char path[CBM_SZ_512];
+        snprintf(path, sizeof(path), "%s/mod_%d_%03d.py", dir, variant, i);
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            continue;
+        }
+        fprintf(f,
+                "class Handler%d:\n"
+                "    def run(self, x):\n"
+                "        return self.helper(x) + %d\n"
+                "    def helper(self, x):\n"
+                "        for i in range(10):\n"
+                "            x += i\n"
+                "        return x\n"
+                "\n"
+                "def main_%d(x):\n"
+                "    return Handler%d().run(x)\n",
+                i, i, i, i);
+        fclose(f);
+    }
+}
+
+static int idx773_double_index_check(const char *dir_a, const char *dir_b) {
+    cbm_setenv("CBM_INDEX_SUPERVISOR", "0", 1);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    if (!srv) {
+        return IDX773_FIRST_FAILED;
+    }
+    char args[CBM_SZ_512];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", dir_a);
+    char *r1 = cbm_mcp_handle_tool(srv, "index_repository", args);
+    bool ok1 = r1 && strstr(r1, "indexed") != NULL;
+    free(r1);
+    if (!ok1) {
+        cbm_mcp_server_free(srv);
+        return IDX773_FIRST_FAILED;
+    }
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"mode\":\"full\"}", dir_b);
+    char *r2 = cbm_mcp_handle_tool(srv, "index_repository", args); /* SIGABRT here (RED) */
+    bool ok2 = r2 && strstr(r2, "indexed") != NULL;
+    free(r2);
+    cbm_mcp_server_free(srv);
+    return ok2 ? IDX773_OK : IDX773_SECOND_FAILED;
+}
+#endif /* !_WIN32 */
+
+TEST(index_second_inprocess_run_survives_issue773) {
+#ifdef _WIN32
+    SKIP_PLATFORM("fork-isolated crash guard (POSIX-only)");
+#else
+    char dir_a[CBM_SZ_256];
+    char dir_b[CBM_SZ_256];
+    char cache[CBM_SZ_256];
+    snprintf(dir_a, sizeof(dir_a), "/tmp/cbm-idx773a-XXXXXX");
+    snprintf(dir_b, sizeof(dir_b), "/tmp/cbm-idx773b-XXXXXX");
+    snprintf(cache, sizeof(cache), "/tmp/cbm-idx773c-XXXXXX");
+    if (!cbm_mkdtemp(dir_a) || !cbm_mkdtemp(dir_b) || !cbm_mkdtemp(cache)) {
+        FAIL("mkdtemp failed");
+    }
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    /* Trigger shape: run 1 small enough for the SEQUENTIAL path (parses on
+     * the calling thread, mimalloc epoch), run 2 large enough for the
+     * PARALLEL path (switches the global ts allocator to the slab). */
+    idx773_write_py_repo(dir_a, 5, 0);
+    idx773_write_py_repo(dir_b, 60, 1);
+
+    int code = -1;
+    bool signalled = false;
+    int sig = 0;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(180); /* generous: two full parallel indexes */
+        _exit(idx773_double_index_check(dir_a, dir_b));
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        signalled = true;
+        sig = WTERMSIG(status);
+    }
+
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+
+    if (signalled) {
+        printf("    child killed by signal %d (SIGABRT = the #773 invalid free)\n", sig);
+    } else if (code != IDX773_OK) {
+        printf("    child exit code %d (71=first index failed, 72=second failed)\n", code);
+    }
+    ASSERT_FALSE(signalled);
+    ASSERT_EQ(code, IDX773_OK);
+    PASS();
+#endif
+}
+
 TEST(index_recovery_parallel_quarantines_crasher) {
 #ifdef _WIN32
     SKIP_PLATFORM("parallel-recovery guard needs fork isolation (POSIX-only)");
@@ -5464,6 +5582,7 @@ SUITE(mcp) {
     RUN_TEST(index_repository_cli_name_override_issue823);
     RUN_TEST(index_supervisor_gate_requires_marked_host_issue845);
     RUN_TEST(index_bg_paths_route_through_supervisor_issue832);
+    RUN_TEST(index_second_inprocess_run_survives_issue773);
     RUN_TEST(index_recovery_parallel_quarantines_crasher);
     RUN_TEST(tool_manage_adr_not_found_rich_error);
     RUN_TEST(tool_manage_adr_get_accepts_abs_path);
