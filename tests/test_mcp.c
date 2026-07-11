@@ -964,8 +964,9 @@ TEST(mcp_discovery_methods_return_empty_lists) {
     };
     for (int i = 0; i < 3; i++) {
         char reqbuf[256];
-        snprintf(reqbuf, sizeof(reqbuf), "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"%s\"}",
-                 100 + i, cases[i].method);
+        snprintf(reqbuf, sizeof(reqbuf),
+                 "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"%s\"}", 100 + i,
+                 cases[i].method);
         char *resp = cbm_mcp_server_handle(srv, reqbuf);
         ASSERT_NOT_NULL(resp);
         ASSERT_NULL(strstr(resp, "Method not found"));
