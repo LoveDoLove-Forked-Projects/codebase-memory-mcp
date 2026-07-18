@@ -448,6 +448,7 @@ static void so_parse_alarm_exit(int sig) {
     (void)sig;
     _exit(0);
 }
+
 #endif
 
 /* Parse `content` with tree-sitter DIRECTLY in a forked child — bypassing
@@ -480,13 +481,18 @@ static bool so_parse_crashes(const char *content, CBMLanguage lang) {
         return false;
     }
     if (pid == 0) {
-        /* Deterministic ceiling: past the merge cap the ambiguity-exploded
-         * GLR parse GRINDS (minutes, environment-dependent — measured 2s to
-         * 218s for the identical input). The guard's signal is the CRASH,
-         * which fires within the first seconds when the recursion cap
-         * regresses — so a clean exit after 10s proves the cap held without
-         * paying for the rest of the grind. SIGSEGV/SIGBUS still report as
-         * WIFSIGNALED; the alarm handler exits cleanly, never masking them. */
+        /* Deterministic ceiling. Falsification data (2026-07-18, macOS
+         * ASan): with CBM_TS_STACK_MERGE_MAX_DEPTH deleted outright, this
+         * branch stayed GREEN both unbounded (220s full grind, no crash)
+         * and bounded — instrumentation shows the recursive merge path is
+         * never even entered here (max depth 0 through the whole window).
+         * The cap-regression DETECTION therefore lives in the Windows
+         * in-process branch above (real ~1 MB native stack, where #913
+         * manifested); this POSIX branch is a bounded no-crash smoke of
+         * the pathological parse, and grinding past 10s adds no signal
+         * (unbounded it wandered 2s-218s with machine state). A real
+         * SIGSEGV/SIGBUS still terminates the child by signal before the
+         * alarm handler can exit cleanly. */
         signal(SIGALRM, so_parse_alarm_exit);
         alarm(10);
         TSParser *parser = ts_parser_new();
