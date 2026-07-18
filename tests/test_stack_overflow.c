@@ -750,7 +750,12 @@ TEST(lsp_kotlin_deep_nesting_no_crash) {
  * Suite registration
  * ═══════════════════════════════════════════════════════════════════ */
 
-SUITE(stack_overflow) {
+/* Split into three sub-suites so parallel/sharded runs are not serialized
+ * behind one ~4-minute suite (it was the wall-clock critical path: every
+ * other suite finished underneath it). Pure re-registration — the 20
+ * RUN_TEST entries are exactly the ones the single suite carried; the
+ * before/after test-count parity is asserted in the shard runner. */
+SUITE(stack_overflow_a) {
     cbm_init();
 
     RUN_TEST(ts_allocator_bound_to_mimalloc_issue424);
@@ -760,12 +765,25 @@ SUITE(stack_overflow) {
     RUN_TEST(lsp_cpp_deep_expression_no_crash);
     RUN_TEST(lsp_python_deep_expression_no_crash);
     RUN_TEST(lsp_perl_deep_expression_no_crash);
+
+    cbm_shutdown();
+}
+
+SUITE(stack_overflow_b) {
+    cbm_init();
+
     RUN_TEST(perl_glr_deep_parse_recursion_capped);
     RUN_TEST(lsp_ts_cyclic_types_no_crash);
     RUN_TEST(lsp_python_deep_nesting_no_crash);
     RUN_TEST(lsp_go_deep_nesting_no_crash);
     RUN_TEST(lsp_php_deep_nesting_no_crash);
     RUN_TEST(lsp_kotlin_deep_nesting_no_crash);
+
+    cbm_shutdown();
+}
+
+SUITE(stack_overflow_c) {
+    cbm_init();
 
     RUN_TEST(js_calls_exceed_512);
     RUN_TEST(python_calls_exceed_512);
