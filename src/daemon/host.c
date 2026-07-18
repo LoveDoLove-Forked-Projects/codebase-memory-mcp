@@ -37,6 +37,12 @@ enum {
     HOST_APPLICATION_SHUTDOWN_MS = 10000,
     HOST_COORDINATION_CLEANUP_MS = 500,
     HOST_INITIAL_CLIENT_TIMEOUT_MS = 10000,
+    /* A just-superseded daemon generation can still hold the cohort claim for
+     * the brief window between going client-terminal (which lets the next
+     * generation start) and releasing its cohort locks. Wait out that handoff
+     * rather than failing startup on a transient BUSY. Bounded well under the
+     * client's 30 s daemon-start budget. */
+    HOST_DAEMON_CLAIM_TIMEOUT_MS = 12000,
     HOST_WAIT_TICK_MS = 100,
     HOST_HTTP_CONFIG_POLL_MS = 1000,
     HOST_HTTP_RETRY_INITIAL_MS = 1000,
@@ -799,8 +805,16 @@ int cbm_daemon_host_run(const cbm_daemon_host_config_t *config) {
         return -1;
     }
     cbm_version_cohort_daemon_claim_t *daemon_claim = NULL;
-    if (cbm_version_cohort_daemon_claim_acquire(cohort_manager, &daemon_claim) !=
-        CBM_VERSION_COHORT_OK) {
+    uint64_t claim_deadline = host_deadline_after(HOST_DAEMON_CLAIM_TIMEOUT_MS);
+    cbm_version_cohort_status_t claim_status =
+        cbm_version_cohort_daemon_claim_acquire(cohort_manager, &daemon_claim);
+    while (claim_status == CBM_VERSION_COHORT_BUSY && cbm_now_ms() < claim_deadline) {
+        /* The previous generation is releasing; retry until the claim is free
+         * or the handoff window elapses (a persistent BUSY = a real conflict). */
+        cbm_usleep(HOST_WAIT_TICK_MS * 1000);
+        claim_status = cbm_version_cohort_daemon_claim_acquire(cohort_manager, &daemon_claim);
+    }
+    if (claim_status != CBM_VERSION_COHORT_OK) {
         cbm_log_error("daemon.start_failed", "component", "claim");
         host_participant_guard_close(&participant_guard);
         host_daemon_claim_close(&daemon_claim);
