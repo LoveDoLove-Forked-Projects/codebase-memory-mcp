@@ -67,6 +67,23 @@ static bool index_supervisor_test_wait_file(cbm_index_worker_handle_t *handle, c
     return false;
 }
 
+/* On failure, the worker's own log/marker files carry the exit reason; they
+ * are deleted during teardown before the asserts run, so dump them at the
+ * failure site or the evidence is gone by the time CI prints the FAIL. */
+static void index_supervisor_test_dump(const char *label, const char *path) {
+    (void)fprintf(stderr, "  [worker-dump] %s: %s\n", label, path && path[0] ? path : "<none>");
+    FILE *file = path && path[0] ? cbm_fopen(path, "rb") : NULL;
+    if (!file) {
+        (void)fprintf(stderr, "  [worker-dump] (missing or unreadable)\n");
+        return;
+    }
+    char content[4096];
+    size_t used = fread(content, 1, sizeof(content) - 1, file);
+    content[used] = '\0';
+    (void)fclose(file);
+    (void)fprintf(stderr, "%s%s", content, used > 0 && content[used - 1] == '\n' ? "" : "\n");
+}
+
 static bool index_supervisor_test_wait_file_text(const char *path, const char *needle,
                                                  uint32_t timeout_ms) {
     uint64_t deadline = cbm_now_ms() + timeout_ms;
@@ -458,6 +475,12 @@ TEST(index_supervisor_async_jobs_are_isolated_cancellable_and_terminal_cached) {
     } else {
         index_supervisor_test_cleanup_handle(second);
     }
+    if (!first_ready || !second_ready) {
+        index_supervisor_test_dump("worker-a log", log_a);
+        index_supervisor_test_dump("worker-b log", log_b);
+        index_supervisor_test_dump("worker-a response", response_a);
+        index_supervisor_test_dump("worker-b response", response_b);
+    }
     (void)cbm_unlink(log_a);
     (void)cbm_unlink(log_b);
     (void)cbm_unlink(marker_a);
@@ -544,6 +567,8 @@ static bool index_supervisor_test_run_probe(const char *mode, bool profiling,
         *response_path_exists_out = cbm_file_size(response_path) >= 0;
         cbm_index_worker_destroy(handle);
     } else {
+        index_supervisor_test_dump("probe worker log", log_path);
+        index_supervisor_test_dump("probe worker response", response_path);
         index_supervisor_test_cleanup_handle(handle);
     }
     if (cbm_file_size(log_path) >= 0) {
@@ -657,6 +682,9 @@ TEST(index_supervisor_drains_terminal_backlog_into_request_progress_callback) {
         index_supervisor_test_cleanup_handle(handle);
     }
 
+    if (!worker_logged || !terminal) {
+        index_supervisor_test_dump("backlog worker log", log_path);
+    }
     index_supervisor_test_restore_env("CBM_CACHE_DIR", saved_cache);
     (void)th_rmtree(cache);
 
@@ -707,6 +735,7 @@ TEST(index_supervisor_oversized_response_is_contained_and_log_is_retained) {
     if (terminal) {
         cbm_index_worker_destroy(handle);
     } else {
+        index_supervisor_test_dump("oversize worker log", log_path);
         index_supervisor_test_cleanup_handle(handle);
     }
     (void)cbm_unlink(log_path);
