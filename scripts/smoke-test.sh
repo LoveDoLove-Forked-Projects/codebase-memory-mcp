@@ -794,6 +794,8 @@ if ! echo "$INSTALL_OUT" | grep -qi 'install\|skill\|mcp\|agent'; then
 fi
 if ! echo "$INSTALL_OUT" | grep -qi 'dry-run'; then
   echo "FAIL: install --dry-run did not indicate dry-run mode"
+  echo "--- install --dry-run output was: ---"
+  echo "$INSTALL_OUT"
   exit 1
 fi
 echo "OK: install --dry-run completed"
