@@ -26,13 +26,6 @@ enum {
     CBM_DAEMON_IPC_RETRY_INTERVAL_MS = 10,
     CBM_DAEMON_IPC_COORDINATION_CLEANUP_MS = 500,
     CBM_DAEMON_IPC_WINDOWS_RENDEZVOUS_RETRY_MS = 250,
-    /* After ConnectNamedPipe the server must see the client's first bytes
-     * before it can impersonate it (ImpersonateNamedPipeClient fails with
-     * ERROR_CANNOT_IMPERSONATE until data has been read from the pipe). The
-     * client always sends its HELLO request immediately after connecting, so
-     * this only bounds how long a connect-but-never-send peer is tolerated;
-     * generous for starved CI runners, still finite. */
-    CBM_DAEMON_IPC_FIRST_FRAME_TIMEOUT_MS = 15000,
 };
 
 /* Last private-namespace validation refusal, set at the exact failing check.
@@ -3364,14 +3357,6 @@ struct cbm_daemon_ipc_connection {
     HANDLE handle;
     atomic_bool poisoned;
     cbm_daemon_ipc_pipe_role_t role;
-    /* First frame header, read by the accept path BEFORE impersonating the
-     * client: ImpersonateNamedPipeClient needs a COMPLETED read on the pipe,
-     * not merely buffered data (PeekNamedPipe is insufficient). connection_
-     * read_full drains these bytes before touching the pipe again, so the
-     * runtime's frame parser still sees an intact HELLO. Server role only. */
-    unsigned char prime[CBM_DAEMON_FRAME_HEADER_SIZE];
-    size_t prime_len;
-    size_t prime_off;
 };
 
 struct cbm_daemon_ipc_startup_lock {
@@ -3845,14 +3830,6 @@ static win_rendezvous_status_t win_endpoint_refresh_rendezvous(
 static win_generation_address_t *win_endpoint_generation_snapshot(
     const cbm_daemon_ipc_endpoint_t *endpoint);
 static int win_legacy_pipe_probe(const cbm_daemon_ipc_endpoint_t *endpoint);
-
-static bool win_token_is_current_user(win_security_t *security, HANDLE token) {
-    PSID token_sid = NULL;
-    void *token_user = win_token_user_query(security, token, &token_sid);
-    bool equal = token_user && token_sid && security->equal_sid(token_sid, security->user_sid);
-    free(token_user);
-    return equal;
-}
 
 static uint32_t win_sid_read_u32_le(const uint8_t *bytes) {
     return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) | ((uint32_t)bytes[2] << 16U) |
@@ -5154,63 +5131,68 @@ static int win_overlapped_wait(HANDLE handle, OVERLAPPED *overlapped, DWORD time
 }
 
 static bool win_pipe_client_is_current_user(HANDLE pipe) {
+    /* Validate the connected client by its process token, resolved from the
+     * pipe's CLIENT process id - the mirror of the client-side server check
+     * (win_pipe_server_is_current_user via GetNamedPipeServerProcessId). This
+     * needs neither impersonation nor a prior read on the pipe, so it works at
+     * accept time without changing accept's contract. ImpersonateNamedPipeClient
+     * was unusable here: it fails with ERROR_CANNOT_IMPERSONATE until the server
+     * has completed a read, which accept must not require. */
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    get_named_pipe_server_process_id_fn get_client_pid =
+        kernel ? (get_named_pipe_server_process_id_fn)GetProcAddress(kernel,
+                                                                     "GetNamedPipeClientProcessId")
+               : NULL;
+    if (!get_client_pid) {
+        cbm_log_warn("daemon.accept.client_identity", "step", "pid_fn_missing");
+        return false;
+    }
+    ULONG process_id = 0;
+    if (!get_client_pid(pipe, &process_id) || process_id == 0) {
+        char error_text[16];
+        (void)snprintf(error_text, sizeof(error_text), "%lu", (unsigned long)GetLastError());
+        cbm_log_warn("daemon.accept.client_identity", "step", "client_pid_query", "error",
+                     error_text);
+        return false;
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (!process) {
+        process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, process_id);
+    }
+    if (!process) {
+        char pid_text[16];
+        char error_text[16];
+        (void)snprintf(pid_text, sizeof(pid_text), "%lu", (unsigned long)process_id);
+        (void)snprintf(error_text, sizeof(error_text), "%lu", (unsigned long)GetLastError());
+        cbm_log_warn("daemon.accept.client_identity", "step", "process_open", "pid", pid_text,
+                     "error", error_text);
+        return false;
+    }
     win_security_t security;
-    if (!win_security_init(&security)) {
-        cbm_log_warn("daemon.accept.client_identity", "step", "security_init");
-        win_security_destroy(&security);
-        return false;
-    }
-    if (!security.impersonate_named_pipe_client(pipe)) {
-        /* ERROR_CANNOT_IMPERSONATE (1368) here means the client has not yet
-         * written to the pipe - i.e. the daemon validated identity before the
-         * client sent its first frame, or the accept loop fired on a pipe with
-         * no real client behind it (the runner spin symptom). */
-        char error_text[16];
-        (void)snprintf(error_text, sizeof(error_text), "%lu", (unsigned long)GetLastError());
-        cbm_log_warn("daemon.accept.client_identity", "step", "impersonate", "error", error_text);
-        win_security_destroy(&security);
-        return false;
-    }
+    bool initialized = win_security_init(&security);
     HANDLE token = NULL;
-    bool opened = security.open_thread_token(GetCurrentThread(), TOKEN_QUERY, TRUE, &token) != 0;
-    if (!opened) {
-        char error_text[16];
-        (void)snprintf(error_text, sizeof(error_text), "%lu", (unsigned long)GetLastError());
-        cbm_log_warn("daemon.accept.client_identity", "step", "thread_token", "error", error_text);
+    bool opened = initialized && security.open_process_token(process, TOKEN_QUERY, &token) != 0;
+    PSID token_sid = NULL;
+    void *token_user = opened ? win_token_user_query(&security, token, &token_sid) : NULL;
+    bool same_user =
+        token_user && token_sid && security.equal_sid(token_sid, security.user_sid) != 0;
+    if (!same_user) {
+        const char *step = !initialized ? "security_init"
+                           : !opened    ? "token_open"
+                           : !token_sid ? "token_query"
+                                        : "sid_mismatch";
+        cbm_log_warn("daemon.accept.client_identity", "step", step);
     }
-    bool same_user = opened && win_token_is_current_user(&security, token);
-    if (opened && !same_user) {
-        /* Impersonation succeeded but the client's account SID does not match
-         * the daemon's. Classify the impersonated identity: an anonymous or
-         * service SID means the pipe carried no real user context. */
-        PSID client_sid = NULL;
-        void *client_user = win_token_user_query(&security, token, &client_sid);
-        const char *sid_class =
-            !client_sid                                                           ? "unreadable"
-            : security.is_well_known_sid(client_sid, WinAnonymousSid)             ? "anonymous"
-            : security.is_well_known_sid(client_sid, WinLocalSystemSid)           ? "system"
-            : security.is_well_known_sid(client_sid, WinBuiltinAdministratorsSid) ? "administrators"
-                                                                                  : "other_account";
-        cbm_log_warn("daemon.accept.client_identity", "step", "sid_mismatch", "client", sid_class);
-        free(client_user);
-    }
+    free(token_user);
     if (token) {
         (void)CloseHandle(token);
     }
-    bool reverted = security.revert_to_self() != 0;
-    win_security_destroy(&security);
-    if (!reverted) {
-        /* Continuing this daemon thread while it still impersonates an
-         * untrusted pipe client would corrupt every subsequent access check. */
-        (void)TerminateProcess(GetCurrentProcess(), ERROR_ACCESS_DENIED);
-        abort();
+    if (initialized) {
+        win_security_destroy(&security);
     }
+    (void)CloseHandle(process);
     return same_user;
 }
-
-/* Defined below; the accept path pre-reads the first frame header through it. */
-static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *buffer,
-                                size_t length, uint64_t deadline_ms);
 
 int cbm_daemon_ipc_accept(cbm_daemon_ipc_listener_t *listener, uint32_t timeout_ms,
                           cbm_daemon_ipc_connection_t **connection_out) {
@@ -5262,28 +5244,9 @@ int cbm_daemon_ipc_accept(cbm_daemon_ipc_listener_t *listener, uint32_t timeout_
     connection->handle = listener->pipe;
     atomic_init(&connection->poisoned, false);
     connection->role = CBM_DAEMON_IPC_PIPE_ROLE_ACCEPTED_SERVER;
-    connection->prime_len = 0;
-    connection->prime_off = 0;
-    /* Read the client's first frame header before impersonating: the client
-     * sends its HELLO immediately after connecting, and a COMPLETED read is
-     * what ImpersonateNamedPipeClient requires (ERROR_CANNOT_IMPERSONATE
-     * otherwise - PeekNamedPipe availability alone is not enough). The header
-     * is retained in the connection prime buffer and drained by
-     * connection_read_full before the runtime's own read. */
-    if (connection_read_full(connection, connection->prime, CBM_DAEMON_FRAME_HEADER_SIZE,
-                             ipc_deadline_after(CBM_DAEMON_IPC_FIRST_FRAME_TIMEOUT_MS)) != 1) {
-        cbm_log_warn("daemon.accept.client_rejected", "stage", "first_frame");
-        free(connection);
-        (void)DisconnectNamedPipe(listener->pipe);
-        (void)CloseHandle(listener->pipe);
-        listener->pipe = INVALID_HANDLE_VALUE;
-        return -1;
-    }
-    connection->prime_len = CBM_DAEMON_FRAME_HEADER_SIZE;
+    /* Validate the client's identity by its process token (no impersonation,
+     * no read) so accept keeps its immediate-return contract. */
     if (!win_pipe_client_is_current_user(listener->pipe)) {
-        /* The daemon-side twin of the client's server_identity log: without
-         * it a server-initiated disconnect is indistinguishable from a
-         * client-side failure in the field. */
         cbm_log_warn("daemon.accept.client_rejected", "stage", "client_identity");
         free(connection);
         (void)DisconnectNamedPipe(listener->pipe);
@@ -5532,8 +5495,6 @@ cbm_daemon_ipc_connection_t *cbm_daemon_ipc_connect(const cbm_daemon_ipc_endpoin
     connection->handle = pipe;
     atomic_init(&connection->poisoned, false);
     connection->role = CBM_DAEMON_IPC_PIPE_ROLE_CONNECTED_CLIENT;
-    connection->prime_len = 0;
-    connection->prime_off = 0;
     return connection;
 }
 
@@ -5621,15 +5582,6 @@ static int connection_read_full(cbm_daemon_ipc_connection_t *connection, void *b
         return -1;
     }
     size_t offset = 0;
-    /* Drain any bytes pre-read before impersonation (the first frame header)
-     * ahead of the pipe, so the runtime's frame parser sees an intact stream. */
-    if (connection->prime_off < connection->prime_len) {
-        size_t available = connection->prime_len - connection->prime_off;
-        size_t take = available < length ? available : length;
-        memcpy(buffer, connection->prime + connection->prime_off, take);
-        connection->prime_off += take;
-        offset = take;
-    }
     while (offset < length) {
         DWORD chunk = length - offset > MAXDWORD ? MAXDWORD : (DWORD)(length - offset);
         DWORD transferred = 0;
